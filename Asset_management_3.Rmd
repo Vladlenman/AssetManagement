@@ -1,0 +1,551 @@
+---
+title: "Asset/Risk Management"
+subtitle: "Equity Risk Premia: Research & Development Factor"
+author: "Vladlen Bazaluk, Jacopo Liera, Maximilian Trentini"
+date: "2023-05-21"
+output: pdf_document
+---
+
+```{r, include = FALSE,results='hide'}
+################################################
+######## Asset Management Unit 1 ###############
+################################################
+
+library(RPostgres)
+library(lubridate)
+library(tidyverse)
+library(xts)
+library(dplyr)
+library(PerformanceAnalytics)
+library(RSQLite)
+library(dbplyr)
+library(tidyr)
+library(data.table)
+library(ggplot2)
+library(stargazer)
+
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+```
+
+
+## Introduction
+
+In the following document, we reproduce the study conducted by \textbf{Chan et al. (2001)}, in examining whether the returns of US firms can be explained by the share of Research and Development expenditure on the market value of equity (\textbf{RDM}). The intuition behind this choice is to define R&D as the best proxy (from an economic standpoint), for the value of intangible assets and the possible future growth. While in the paper they present results for different lag times, analyzing the effect of \textbf{RDM} at 1, 2, 3 years after portfolio formation, we keep the reproduction to the scope of 1 year only. Furthermore, where the authors take the cross-section of stock returns from $[1976,1995]$, we shift it to the period from $[1999, 2023]$. We want to answer to the following questions:
+
+- (1) Are Research and Development expenditure a meaningful predictor of firm's excess returns?
+- (2) How do our results differ from the paper of \textbf{Chan et al. (2001)} and
+- (3) how do these results compare for a different cross-section?
+
+Finally, we want to inquire whether the CAPM, the Fama and French 3-Factor Model and the 5-Factor Model analyzed in \textbf{Hou et al (2021)} are explainers for the return differentials given by the univariate portfolio sorts based on \textbf{RDM}. Below we start with querying and preparing the data for the analysis. 
+
+
+## Data
+
+### Querying from WRDS
+
+Firstly, we need to get the largest pool of firms possible to conduct our analysis. We follow the steps laid down in 
+\textbf{Tidy Finance with R} to query the data from WRDS. We merge CRSP and Compustat data-sets through a "linktable", to match different unique key variables (GVKEY and PERMNO), which are different identifiers for the companies.
+
+We get the R&D expenses from periods from 1976 to 2023. The choice of restricting the period came principally from the fact that we did not manage to get a large enough sample size of firms with complete time-series of R&D expenses in the given period. Nevertheless this choice was obviously made on the full sample size. In the query we immediately get returns from WRDS, with the rationale that we do not need to recalculate them after sorting the portfolios. 
+
+```{r, include = FALSE}
+######################################
+#### 1.1 Alternative Data Collection
+######################################
+
+start_date <- ymd("1960-01-01")
+end_date <- ymd("2023-01-01")
+
+wrds <- dbConnect(
+  Postgres(),
+  host = "wrds-pgdata.wharton.upenn.edu",
+  dbname = "wrds",
+  port = 9737,
+  sslmode = "require",
+  user = "maxtrentini",
+  password = ""
+)
+
+# Retrieve COMPUSTAT & CRSP data -------------------------------------------------
+
+# get linktable to be able to join compustat and crsp data as gvkey and permno
+# are not the same
+linktable_db <- tbl(
+  wrds,
+  in_schema("crsp", "ccmxpf_linktable")
+)
+
+# linktable is the df we use to match CRSP and Compustat as explained above
+linktable <- linktable_db %>% 
+  filter(linktype %in% c("LU", "LC") &
+           linkprim %in% c("P", "C") &
+           usedflag == 1) %>% 
+  select(permno = lpermno, gvkey, linkdt, linkenddt) %>% 
+  collect() %>% 
+  mutate(linkenddt = replace_na(linkenddt, today()))
+
+# Get r&d expenses
+r_d_s <- tbl(wrds, in_schema("comp", "funda")) %>%
+  select(date = datadate, gvkey,
+         r_d = xrd, sales_year = revt, equity = ceq) %>% 
+  as.data.table()
+
+r_d_sdate_filtered <- r_d_s[date > ymd("1976-01-01") & date < ymd("2023-01-01")]
+
+
+# add the year 
+r_d_sdate_filtered[, c("month", "year") := list(month(date), year(date))]
+
+# correct year if statement date is after april (where we form our portfolios
+# based on the latest available data!)
+
+r_d_sdate_filtered[, year := ifelse(month > 4, year + 1, year)]
+r_d_sdate_filtered[, month := NULL] # drop month as we dont need it
+
+#####################################
+####    Get Delisting too        ####
+#####################################
+
+# CRSP Monthly ---------------------------------------------------------------
+start_date <- as.Date("1976-01-01")
+end_date <- as.Date("2023-01-01")
+## Returns
+msf_db <- tbl(wrds, in_schema("crsp", "msf"))
+
+## Names
+msenames_db <- tbl(wrds, in_schema("crsp", "msenames"))
+
+## Delisting
+msedelist_db <- tbl(wrds, in_schema("crsp", "msedelist"))
+
+# CRSP
+crsp_monthly <- msf_db %>% 
+  filter(date >= start_date & date <= end_date) %>% 
+  inner_join(msenames_db %>% 
+               filter(shrcd %in% c(10, 11)) %>% 
+               select(permno , exchcd, siccd, namedt, nameendt), by = c("permno")) %>% 
+  filter(date >= namedt & date <= nameendt) %>% 
+  mutate(month = floor_date(date, "month")) %>% 
+  left_join(msedelist_db %>% 
+              select(permno, dlstdt, dlret, dlstcd) %>% 
+              mutate(month = floor_date(dlstdt, "month")), by = c("permno", "month")) %>% 
+  select(permno, month, return = ret, retx, shares = shrout, price = altprc, exchcd, siccd, dlret, dlstcd) %>% 
+  mutate(month = as.Date(month)
+         , market_eq = abs(price * shares)/1000) %>% 
+  select(-price, -shares) %>% 
+  collect()
+
+crsp_monthly <- crsp_monthly %>% 
+  mutate(exchange = case_when(
+    exchcd %in% c(1, 31) ~ "NYSE",
+    exchcd %in% c(2, 32) ~ "AMEX",
+    exchcd %in% c(3, 33) ~ "NASDAQ",
+    .default = "Other"
+  ))
+
+crsp_monthly <- crsp_monthly %>%  
+  filter(
+    exchcd == 1|exchcd == 2|exchcd == 3
+  )
+crsp_monthly <- crsp_monthly %>% 
+  mutate(
+    date = month
+  )
+
+links2 <- crsp_monthly %>% 
+  inner_join(linktable, by = "permno", relationship = "many-to-many") %>% 
+  filter(!is.na(gvkey) & (date >= linkdt & date <= linkenddt)) %>% 
+  select(permno, gvkey, date) %>% 
+  as.data.table()
+
+crsp_enriched2 <- merge(crsp_monthly, links2, 
+                        by = c("permno", "date"), all.x = T)
+
+#####################################
+####    End of get Delisting     ####
+#####################################
+
+# crsp data to calculate market equity value -------------------------------------------------
+crsp_data <- tbl(wrds, in_schema("crsp", "msf")) %>% 
+  filter(hexcd %in% 1:3) %>% # 1 = NYSE, 2 = AMEX = NYSE MKT, 3 = NASDAQ
+  select(date, permno, return = ret, price = altprc, shares = shrout) %>% 
+  mutate(market_eq = abs(price * shares)/1000) %>%
+  select(-price, -shares) %>% 
+  as.data.table()
+
+
+crsp_data_date_filtered <- crsp_data[date >= ymd("1976-01-01") & 
+                                       date <= ymd("2023-01-01")]
+
+# make final link table 
+links <- crsp_data_date_filtered %>% 
+  inner_join(linktable, by = "permno", relationship = "many-to-many") %>% 
+  filter(!is.na(gvkey) & (date >= linkdt & date <= linkenddt)) %>% 
+  select(permno, gvkey, date) %>% 
+  as.data.table()
+
+# finally switch to data.table for more speed. 
+# merge crsp data and the links
+crsp_enriched <- merge(crsp_data_date_filtered, links, 
+                       by = c("permno", "date"), all.x = T)
+# add the month
+crsp_enriched[, c("month", "year") := list(month(date), year(date))]
+
+# for portfolio formation we only need the r_d values and the market equity in 
+# the end of april (filter crsp data accordingly)
+
+data_for_sort <- merge(crsp_enriched[month == 4], r_d_sdate_filtered, 
+                       by = c("year", "gvkey"), all.x = T) %>% 
+  select(
+    -c(date.x,month)
+  ) %>% 
+  filter(!is.na(return))
+```
+
+
+### Filtering the data
+
+Before reaching to the final conclusion on which cross-section to take, we filtered those companies which had a complete time-series for R&D. After trying out a few, we decided to take the period from 1999 to 2023 as the largest sample period.
+
+```{r, warning=FALSE}
+######################################
+#### 1.1 Filtering Data we need
+######################################
+
+## Filtering NAs for gvkey
+data <- data_for_sort[!is.na(data_for_sort$gvkey)]
+
+## Computing RDM
+data$RDM <- data$r_d/data$market_eq
+
+
+## Note for the results of this filtering. I want to take ONLY those observations
+## which have a COMPLETE time-series. I define a complete time-series as one 
+## which has n consecutive observations. 
+
+
+filtro <- data %>% 
+  filter(year == 1999) %>% 
+  select(gvkey, RDM) %>% 
+  na.omit() %>% 
+  distinct(gvkey)
+
+## Sorting for time-frames larger than 1999 in fiscal years.
+df_sort <- data %>% 
+  filter(gvkey %in% filtro$gvkey) %>% 
+  filter(year >= 1999)
+
+
+## Take out all RDM Nas, why? It is not requested in the task so why keep it.
+df_sort <- df_sort[c(!is.na(df_sort$RDM)), ]
+
+## Here we get the GVKEYS to get the companies with a complete time-frame
+GVKEY_chosen <- df_sort %>% 
+  group_by(gvkey) %>% 
+  mutate(n = length(date.y)) %>% 
+  filter(n >= 22) %>%  ## condition <----
+distinct(gvkey)
+
+## Here we get the final data-set on which we can start the sorting. 
+df_sort <- df_sort %>% 
+  filter(gvkey %in% GVKEY_chosen$gvkey)
+```
+
+### 1.2 Sort stocks into portfolios
+
+In this section we sort the portfolios into 5 as indicated in the assignment. The function iteratively creates variables for each period of the sort. In a second step we join the new columns into a unique one called ports. Based on these numbered factors, we can then give the average returns for each portfolio sort and the return differentials.
+Note we merge back the monthly returns for each stock, to have a larger sample size in the upcoming regressions. 
+
+```{r, output = FALSE, warning=FALSE}
+####################################
+#### Portfolio Sorts
+####################################
+
+portfolio_sort <- function(dataframe, startdate, endate){
+  
+  for(i in startdate:(endate - 1) ){ # Note we sort until one year before cause no return in 2024
+    
+    # For naming later on
+    index <- i - 1999
+    varname <- paste0("psort_", index)
+    
+    # Filter for fiscal year of interest
+    df_tmp <- filter(dataframe, year == i)
+    
+    # Get the portfolio sorts for the tmp fiscal year
+    df_tmp <- df_tmp %>%
+      mutate(!!varname := ntile(RDM, 5)) %>% 
+      select(gvkey, year, all_of(varname))
+    
+    # Left Join df_tmp, (We will have NAs for any unmatched year)
+    dataframe <- dataframe %>% left_join(df_tmp, by = c("gvkey", "year")) 
+    
+  }
+  
+  return(dataframe)
+}
+
+## -- Warning message that there is exactly one row which matches twice!
+df_sorted <- portfolio_sort(dataframe = df_sort, startdate = 1999, endate = 2023)
+
+
+ports <- list()
+count <- 1
+count2 <- 11
+df_sorted <- as.data.frame(df_sorted)
+for(i in 11:34){
+  
+  ports[[count]] <- df_sorted[c(!is.na(df_sorted[,count2])),count2]
+  count <- count + 1
+  count2 <- count2 + 1
+  
+}
+ports <- unlist(ports)
+length(ports)
+
+df_sorted <- cbind(df_sorted[,1:10], ports)
+
+## Note that in section 0.1 We had CRSP_enriched which contains monthly returns for each stocl
+## Based on this we merge this info into the new df_sorted.
+
+
+crsp_merge <- crsp_enriched %>% 
+  select(gvkey, year, month, date, return)
+
+df_sorted_monthly <- df_sorted %>% 
+  left_join(crsp_merge, by = c("gvkey", "year")) %>% 
+  select(gvkey, date.y, date, year, month, return.x, return.y, RDM, market_eq, ports)
+
+colnames(df_sorted_monthly) <- c("gvkey", "date_yearly", "date_monthly", "year",
+                                 "month", "return_yearly", "return_monthly",
+                                 "RDM", "market_eq", "ports")
+```
+
+### 1.3. Compute the long-short return differential.
+
+We compute the long-short return differentials using the approach that we take the differences between the portfolios of shares with the highest R&D expenses and with the lowest ones. We calculate such value for each year and for the final value calculate the common return differential rate with this formula:
+
+$$r_k^{diff} = \frac{\sum_{i=1}^N r_i^{(5)}}{N} - \frac{\sum_{i=1}^N r_i^{(1)}}{N}$$
+
+For the yearly values we get the graph, on which we can see that the values of long-short return differentials were changing after each year, but mostly the values are negative
+
+```{r, include=FALSE, warning=FALSE}
+df_sorted_returns <- df_sorted %>%
+  group_by(year, ports) %>%
+  summarise(average_return = mean(return)) %>% 
+  ungroup()
+
+df_longshort <- df_sorted_returns %>%
+  filter(ports %in% c(1, 5)) %>%
+  spread(ports, average_return) %>%
+  mutate(longshort = `5` - `1`) %>% 
+  select(year, longshort)
+
+df_longshort <- as.data.frame(df_longshort)
+```
+
+```{r, echo=FALSE, warning=FALSE}
+ggplot(df_longshort, aes(x = year, y = longshort)) +
+  geom_line(color = "gray", size = 1) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  labs(x = "Year", y = "Long-short return differential") +
+  ggtitle("Long-short return differential (1999- 2022)") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 14, face = "bold"),
+        axis.title = element_text(size = 12),
+        axis.text = element_text(size = 10),
+        axis.line = element_line(size = 0.5),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank())
+```
+
+For the final result from the formula we get such value that supports our previous expectancies:
+
+$$r_k^{diff} = \frac{\sum_{i=1}^N r_i^{(5)}}{N} - \frac{\sum_{i=1}^N r_i^{(1)}}{N} = -0.02092536$$
+
+## Part 2
+
+### Plot the return differential’s time series. How can you use it to assess the riskiness of the strategy? 
+
+```{r, echo=FALSE, warning=FALSE}
+
+par(mfrow = c(2, 2))
+
+crsp_merge <- crsp_enriched %>% 
+  select(gvkey, year, month, date, return)
+
+df_sorted_monthly <- df_sorted %>% 
+  left_join(crsp_merge, by = c("gvkey", "year")) %>% 
+  select(gvkey, date.y, date, year, month, return.x, return.y, RDM, market_eq, ports)
+
+colnames(df_sorted_monthly) <- c("gvkey", "date_yearly", "date_monthly", "year",
+                                 "month", "return_yearly", "return_monthly",
+                                 "RDM", "market_eq", "ports")
+
+df_sorted_monthly <- df_sorted_monthly[c(df_sorted_monthly$ports == 1 | df_sorted_monthly$ports == 5),]
+
+reg.data <- df_sorted_monthly |> 
+  group_by(year, month, ports) |> 
+  mutate(ret = mean(return_monthly, na.rm = T)) |> 
+  ungroup() |> 
+  select(year, month, ports, ret)
+
+reg.data <- unique(reg.data)
+
+helper <- reg.data$ret[reg.data$ports == 5] - reg.data$ret[reg.data$ports == 1]
+
+reg.data <- reg.data |> 
+  select(year, month) |> 
+  mutate(year_month = paste(year, month, sep = "_")) |> 
+  ungroup() |> 
+  select(year_month)
+
+reg.data <- unique(reg.data)
+reg.data <- reg.data |> 
+  mutate(ret_diff = helper) 
+
+for (i  in 1:length(reg.data$ret_diff)) {
+  reg.data[i,3] <- ifelse(i == 1,0, var(reg.data$ret_diff[1:i]))
+}
+
+## normal plot
+
+monthly_dates <- seq( as.Date("1999-01-01"),as.Date("2022-12-01"), by = "month")
+
+ret_diff <- data.frame(date = monthly_dates, ret.diff = reg.data$ret_diff, var = reg.data$...3)
+
+plot(ret_diff$date, ret_diff$ret.diff, type = "l", xaxt = "n", xlab = "", ylab = "Return Differential", main = "Return differentials across time")
+
+abline(h = 0, col = "blue", lty =2)
+
+year_dates <- c(seq( as.Date("1999-01-01"),as.Date("2022-12-01"), by = "year"),as.Date("2022-12-31"))
+
+axis(1, at = year_dates, labels = format(year_dates, "%b-%Y"), las = 2)
+
+## histogram
+
+hist(ret_diff$ret.diff, xlab = "Return Differential", main = "Histogram of Return differential", breaks = 50)
+
+## QQ-plot to normal distribution
+
+qqnorm(ret_diff$ret.diff, pch = 1, frame = FALSE)
+qqline(ret_diff$ret.diff, col = "steelblue", lwd = 2)
+
+## variance of return differentials
+
+plot(ret_diff$date, ret_diff$var, type = "l", xaxt = "n", xlab = "", ylab = "Variance", main = "Rolling variance; Return differentials")
+
+abline(h = 0, col = "blue", lty =2)
+
+year_dates <- c(seq( as.Date("1999-01-01"),as.Date("2022-12-01"), by = "year"),as.Date("2022-12-31"))
+
+axis(1, at = year_dates, labels = format(year_dates, "%b-%Y"), las = 2)
+
+par(mfrow = c(1, 1))
+
+```
+
+The above figure highlights different plots of the return differential. Beginning with the plot of returns across time, this allows us to gain insight into the variance and the volatility clusters, one can observe that the return differential was further open in the beginning of the observation period an became closer to zero in the last decade. Especially until the burst of the dot-com bubble we observe higher volatility. Now higher volatility implies more deviation from the expectation and is in a traditional sense associated with a riskier strategy. 
+
+Moving ahead, we want to gain a first idea of the distribution of the returns, for this we plot a histogram which highlights some characteristics of a normal distribution. Nonetheless, it has to be added that we observe a fat positive tail and accordingly also a (even if less pronounced) negative tail as well. To further gain insight we look at the quantile to quantile plot, where we can notice that the data around the mean fits a normal distribution while the tails are apparently not normal.
+
+Finally we look at the rolling variance untiul meassured from $t = 0$ to $t = T$, here we observe a drastic increase an high fluctuation in the beginning which is later reduced, indicating that the volatility has reduced over time.
+
+In summary these plots allow us to gain a primitive insight into the volatility and the potential value at risk, nonetheless to properly analyse the riskiness of the stratey more sophisticated methods should be used as the plots only give a superificial picture of the topic.
+
+### Use the CAPM and the Fama and French (1993) three-factor modelto assess the return differential’s risk exposures. What do these models imply for the riskiness of the return differential?
+
+The loadings on different factors of the Fama and French three factor model, and the CAPM beta tell us how much the returns change with a one-unit movement in the factor. In other words they describe the sensitivity of the returns to these factors. In relation to the riskiness, we can assess that an higher sensitivity to one factor, would mean that returns could be more volatile and therefore we would have fatter tails. This in turn would make extreme events more likely. At the same time, we would hava risk premia for the fact we are taking on highly sensible stocks for example. 
+Below we can see the interpretation on how these returns correlate with the factors:
+```{r}
+data.FF <- read.csv("FF5factors.csv")
+data.FF <- data.FF[c(data.FF$date >= 199901 & data.FF$date <= 202212), ]
+
+## regressions 1 with excess return differential
+reg.data <- cbind(reg.data$ret_diff, data.FF[,c(2,3,4,7)])
+reg.data[, 2:5] <- reg.data[, 2:5]/100
+
+colnames(reg.data) <- c("ret_diff", "Mkt.RF", "SMB", "HML", "RF")
+
+reg.CAPM <- lm((ret_diff - RF) ~ Mkt.RF, data = reg.data)
+reg.FF.3 <- lm((ret_diff - RF) ~ Mkt.RF + SMB + HML, data = reg.data)
+```
+
+```{r, results='asis'}
+stargazer(reg.CAPM , header = FALSE, no.space = TRUE, dep.var.caption = "", report = ("vc*p"),
+float = FALSE,title = "Excess differential; CAPM")
+```
+
+```{r, results='asis'}
+ stargazer(reg.FF.3 , header=FALSE, no.space=TRUE, dep.var.caption="",report=("vc*p"),
+float = FALSE,title="Excess differential; FF 3 Factor")
+```
+
+### Compute the return differentials risk measures: 95% and 99% value-at-risk and expected shortfall. Interpret your findings by contrasting them to the size and value factors from Fama and French (1993).
+
+```{r, include=FALSE, warning=FALSE}
+data.FF <- read.csv("FF5factors.csv")
+data.FF <- data.FF[c(data.FF$date >= 199901 & data.FF$date <= 202212), ]
+data.FF$date <- c(1:288)
+start_date <- as.Date("1999-01-01")
+end_date <- as.Date("2022-12-31")
+dates <- seq(start_date, end_date, by = "month")
+data.FF$real_dates <- format(dates, "%Y-%m")
+data.FF <- data.FF[,-1]
+data.FF$SMB <- data.FF$SMB/100
+data.FF$HML <- data.FF$HML/100
+## Return differentials risk measures
+
+VaR_95 <- VaR(reg.data$ret_diff, p = 0.95, method="historical")
+
+VaR_99 <- VaR(reg.data$ret_diff, p = 0.99, method="historical")  
+
+ES_95 <- ES(reg.data$ret_diff, p = 0.95, method = "historical")
+
+ES_99 <- ES(reg.data$ret_diff, p = 0.99, method = "historical")
+
+VaR_95_SMB <- VaR(data.FF$SMB, p = 0.95, method="historical")
+
+VaR_99_SMB <- VaR(data.FF$SMB, p = 0.99, method="historical")  
+
+ES_95_SMB <- ES(data.FF$SMB, p = 0.95, method = "historical")
+
+ES_99_SMB <- ES(data.FF$SMB, p = 0.99, method = "historical")
+
+VaR_95_HML <- VaR(data.FF$HML, p = 0.95, method="historical")
+
+VaR_99_HML <- VaR(data.FF$HML, p = 0.99, method="historical")  
+
+ES_95_HML <- ES(data.FF$HML, p = 0.95, method = "historical")
+
+ES_99_HML <- ES(data.FF$HML, p = 0.99, method = "historical")
+
+```
+
+For the 95% and 99% value-at-risk and expected shortfall we have such values:
+
+\begin{table}[ht!]
+\centering
+\caption{Value-at-risk and expected shortfall}
+\begin{tabular}{rrr}
+\hline
+\hline
+ & $95\%$ & $99\%$ \\
+Value-at-Risk (Return differential) & -0.106 & -0.123\\
+Expected Shortfall (Return differential) & -0.118 & -0.127 \\
+Value-at-Risk (Company Size) & -0.042 & -0.0649\\
+Expected Shortfall (Company Size) & -0.0592 & -0.102 \\
+Value-at-Risk (Company value) & -0.0475 & -0.086\\
+Expected Shortfall (Company value) & -0.0757 & -0.116 \\
+\hline
+\hline
+\end{tabular}
+\end{table}
+
+Comparing the results of value-at-risk for different percentages we can observe that value-at-risk value decreases from $-10.6\%$ to $-12.3\%$. 
+For the expected shortfall this difference is less. The heavy tails of the return differentials are not that huge, as the $99\%$ values for different risk measures do not hugely differ from each other, so for the weighted measure there is no significant outlier.
+
+Thus, our constructed portfolios return differentials have $5\%$ probability of losing around $11\%$ in one month and 1% probability of losing around $12\%$ in one month. We can confirm that such probabilities of the risk measures are not large and our portfolio can be noticed as not risky one (potential losses do not break $15\%$ benchmark).
+
+However, comparing our portfolio to Fama Fench portfolios we can see that our suggestion is far more riskier, because we have higher VaR and ES values. For 5% probability we have for Fama Fench sized portfolios $4.2\%$ and $6.5\%$. For value sorted portfolios we have $4.75\%$ and $8.6\%$. Expected shortfall values glead to the same conclusions.
