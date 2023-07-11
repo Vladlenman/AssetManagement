@@ -1,0 +1,1041 @@
+---
+title: "Assignment 2 - Bond risk premia" 
+subtitle: "Asset / Risk Management I - SS 2023"
+author: | 
+  | Vladlen Bazaluk - 12225381
+  | Marta Jablonska - 12229390
+  | Jacopo Liera - 11921885
+date: "08-06-2023"
+output: 
+  pdf_document:
+    extra_dependencies: ["amsmath", "amsfonts", "stmaryrd", "xcolor"]
+header-includes:
+    - \usepackage{sectsty}
+    - \usepackage{float}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.width=10, fig.height=5)
+```
+
+# Task 1
+
+### Write R code to partially reproduce results from Cochrane and Piazzesi(2005). Briefly describe and interpret the results.
+
+```{r, include = FALSE}
+########################################################
+### ARM 2: Replication of Cochrane and Piazzesi.
+########################################################
+## Libraries Used
+library(dplyr)
+library(xts)
+library(ggplot2)
+library(reshape2)
+library(zoo)
+library(forcats)
+library(AER)
+library(tidyr)
+
+## Working Directory, i.e.there has to be a "Data" named folder otherwise it won't work
+setwd(paste0(dirname(rstudioapi::getActiveDocumentContext()$path), "/Data"))
+
+########################################
+### 0.1 Data Manipulation 
+#######################################
+load("data_assignment_2.RData")
+
+## Explanation of the data given:
+
+# FBm is the Fama-Bliss data (monthly), I need only subset of the period, 
+# Those should be yields, so I can get prices. Monthly probably to get forward
+# rates. 
+
+# GSWm stands for Gürkaynak-Sack-Wright yields, monthly dataset. 
+
+## Taking Logs as in Cochrane and Piazzesi:
+# Ref: https://www.govinfo.gov/content/pkg/ERP-2012/pdf/ERP-2012-table73.pdf
+# for bond yields in the US, after doing comparison I conclude they aren't logged 
+# yet. 
+## Everything numeric apart from year-month data.
+unlist(lapply(GSWm, class))
+unlist(lapply(FBm, class))
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+## Explanation of the data given:
+
+# FBm is the Fama-Bliss data (monthly), I need only subset of the period, 
+# Those should be yields, so I can get prices. Monthly probably to get forward
+# rates. 
+
+# GSWm stands for Gürkaynak-Sack-Wright yields, monthly dataset. 
+
+## Taking Logs as in Cochrane and Piazzesi:
+# Ref: https://www.govinfo.gov/content/pkg/ERP-2012/pdf/ERP-2012-table73.pdf
+# for bond yields in the US, after doing comparison I conclude they aren't logged 
+# yet. 
+
+## Every piece of data manipulation follows Cochrane and Piazzesi pag {140, 141}
+#FBm[, 1:5] <- lapply(FBm[, 1:5], function(x) log(x))
+
+## Reusable function later on for the second task (pay attention to indexes!!)
+price_maker <- function(dataframe, start_ind, end_ind){
+  
+  for(i in start_ind:(end_ind)){ # Note we are taking each yield column denoted by index
+    # For naming later on
+    varname <- paste0("fb.p0", i)
+
+    # Get a new column with the prices for the specified maturity
+    dataframe <- dataframe %>%
+      dplyr::mutate(!!varname := dataframe[, i] * (-1) * (i))
+  }
+  
+  return(dataframe)
+}
+
+## Here we get the dataframe with the prices included
+# WARNING: negative prices, why?
+FBm <- price_maker(dataframe = FBm, start_ind = 1, end_ind = 5)
+
+## Getting the forward rates on a monthly basis
+FBm$fb.f02 <-  FBm$fb.p01 - FBm$fb.p02
+FBm$fb.f03 <-  FBm$fb.p02 - FBm$fb.p03
+FBm$fb.f04 <-  FBm$fb.p03 - FBm$fb.p04
+FBm$fb.f05 <-  FBm$fb.p04 - FBm$fb.p05
+
+## Get *yearly* returns, reasoning is contained in second line pag 138 Cochrane
+# "We run regressions of one-year excess returns". Hence the assumption of 
+# needing a 1 year lag for return calculation. t is assumed to be monthly nevertheless.
+FBm$fb.r02 <- lead(FBm$fb.p01, 12) - FBm$fb.p02
+FBm$fb.r03 <- lead(FBm$fb.p02, 12) - FBm$fb.p03
+FBm$fb.r04 <- lead(FBm$fb.p03, 12) - FBm$fb.p04
+FBm$fb.r05 <- lead(FBm$fb.p04, 12) - FBm$fb.p05
+
+## Get *Yearly* excess returns 
+FBm$fb.rx02 <- FBm$fb.r02 - FBm$fb.y01
+FBm$fb.rx03 <- FBm$fb.r03 - FBm$fb.y01
+FBm$fb.rx04 <- FBm$fb.r04 - FBm$fb.y01
+FBm$fb.rx05 <- FBm$fb.r05 - FBm$fb.y01
+```
+
+One of the main pedagogical inputs of the paper consists in demonstrating that a single factor, namely the combination of forward rates at different maturities, predicts excess returns on one to five year maturity of bonds. This stands in deep contrast to the expectation hypothesis also presented in class, which states that long yields are the average of future expected short yields. This is equivalent as saying that excess returns should not be predictable. As evidence, we bring forward the reproduction of Figure 1 of Cochrane and Piazzesi (2005). The first panel represents the $\beta$ estimates from unrestricted regressions, which are significant and present large $R^2$. These are the results of regressions which are run on the dependent variable of the one-year excess returns, which can be interpreted as the action of buying the long-term bond and borrowing at the one-year rate:
+$$
+rx_{t+1}^{(n)} =  r_{t+1}^{(n)} - y_t^{(1)}
+$$
+The regressors are the five forward rates which are available at the beginning of the period $f^{(n)}_t$. From the Fama-Bliss data we strictly have 4 forward rates, for the 4 different maturities of the bonds we have included. The X-axis represents maturity of the forward rate, while the Y-axis the magnitude of the $\beta$ estimates. As in Cochrane and Piazzesi (2005) we obtain a "tent-shaped" forecast of the factors, where it is clear that the 3-year maturity forward has the biggest loading for all 4 types of bond maturities. The results also match Cochrane and Piazzesi (2005) in terms of ordering of magnitude of the $\beta$ coefficients and bond maturity, i.e. bond maturity 5 has the highest loadings on forward rates of 2, 3, 4 years of maturity. 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+########################################
+### 1.1 Figure 1 Part A
+########################################
+
+## We need to take data from 1964 January to 2003 December
+upper <- as.yearmon("2003-12")
+lower <- as.yearmon("1964-01")
+
+## Filter Data
+regdata <- FBm %>% 
+  filter(ym <= upper)
+regdata <- regdata %>% 
+  filter(ym >= lower)
+
+## Regressions
+m02 <- lm(fb.rx02 ~ fb.y01 + fb.f02 + fb.f03 + fb.f04 + fb.f05, data = na.omit(regdata))
+m03 <- lm(fb.rx03 ~ fb.y01 + fb.f02 + fb.f03 + fb.f04 + fb.f05, data = na.omit(regdata))
+m04 <- lm(fb.rx04 ~ fb.y01 + fb.f02 + fb.f03 + fb.f04 + fb.f05, data = na.omit(regdata))
+m05 <- lm(fb.rx05 ~ fb.y01 + fb.f02 + fb.f03 + fb.f04 + fb.f05, data = na.omit(regdata))
+
+tableA <- as.data.frame(cbind(coef(m02)[2:6], coef(m03)[2:6], coef(m04)[2:6], coef(m05)[2:6]))
+colnames(tableA) <- c("2", "3", "4", "5")
+rownames(tableA) <- c("y01", "f02", "f03", "f04", "f05")
+
+## Plotting table
+tableA <- tibble::rownames_to_column(tableA, "Forwards")
+
+## Part A Figure 1
+# Ignore warning
+tableA  %>%
+  mutate(Forwards = fct_relevel(name = Forwards, c("y01",
+              "f02", "f03", "f04", "f05"))) %>%
+  melt(id.vars = c("Forwards")) %>% 
+  ggplot() +
+  geom_point(aes(x = Forwards, y = value, col = variable),
+             alpha =  0.5) +
+  geom_line(aes(x = Forwards, y = value, col = variable, group = variable),
+            alpha = 0.8) +
+  ggtitle("Figure 1. Non-restricted model coefficients (reproduced)") +
+  labs(col = "Bond Maturities") + 
+  xlab("Forward Rate Maturities") + ylab("Beta Values") + 
+  theme_bw() +
+  theme(text = element_text(size = 15, face = "bold"),
+        legend.position = c(0.8675, 0.85))
+```
+
+This second panel is the reproduction of the restricted estimates $b\gamma^\intercal$, from the single factor model. This model is computed by regressing the variable $\overline{rx}_{t+1}$ on the same regressors as in the unrestricted case. The main difference is that the coefficients are then linearly combined to form a single "factor" with which we regress again the excess return of each bond at different maturity. In this second figure we plot $\left[b_n \gamma_1, ..., b_n\gamma_5\right]$  loadings. Once again, we observe the resemblance of the tent-shaped factors to the results in the paper, meaning that for the selected cross-section our calculations are consistent with the paper. 
+
+In Table 1 we present also a synthesis of the estimates of the regression models. Here we have the estimates for the values of $\gamma$ and $b$, standard errors calculated and $R^2$. We can notice that the $R^2$ from all regression are significantly above the $0.3$ benchmark, which is strong evidence against the expectation hypothesis, fueling the idea that bond excess returns can be explained. In part B of the table we have statistics for unrestricted regression. Since the $R^2$ on the right-hand side of the table are pretty much the same to the unrestricted regressions. Therefore, we conclude the single-factor model restrictions have the same forecasting ability as the unrestricted ones. Table 2 finally presents the statistics for the Fama and Bliss regression. The $R^2$ are severely lower than the single-factor regression and the unrestricted regression
+$$
+rx_{t+1}^{(n)} = \alpha + \beta(f_t^{(n)} - y_t^{(n)}) + \epsilon_{t+1}^{(n)}
+$$.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+########################################
+### 1.2 Figure 1 Part B
+########################################
+## Estimation of equation (2) pag 142 Cochrane
+regdata$mean_rx <- rowMeans(regdata[, 20:23])
+
+## Regression on average return across bond maturities
+mgamma <- lm(mean_rx ~ fb.y01 + fb.f02 + fb.f03 + fb.f04 + fb.f05, data = na.omit(regdata))
+gammas <- coef(mgamma)
+
+## Linear Combination of Forwards and 1-Year Yield
+regdata$fb.fgamma <- gammas[1] + gammas[2] * regdata$fb.y01 + gammas[3] * regdata$fb.f02 + gammas[4] * regdata$fb.f03 + gammas[5] * regdata$fb.f04 + gammas[6] * regdata$fb.f05
+
+## Restricted regression
+m02r <- lm(fb.rx02 ~ fb.fgamma, data = na.omit(regdata))
+m03r <- lm(fb.rx03 ~ fb.fgamma, data = na.omit(regdata))
+m04r <- lm(fb.rx04 ~ fb.fgamma, data = na.omit(regdata))
+m05r <- lm(fb.rx05 ~ fb.fgamma, data = na.omit(regdata))
+
+## Betas from restricted regression
+b02 <- coef(m02r)[2]
+b03 <- coef(m03r)[2]
+b04 <- coef(m04r)[2]
+b05 <- coef(m05r)[2]
+  
+## Plotting Table
+tableB <- as.data.frame(cbind(gammas[2:6] * b02, gammas[2:6] * b03, gammas[2:6] * b04, gammas[2:6] * b05))
+colnames(tableB) <- c("2", "3", "4", "5")
+rownames(tableB) <- c("y01", "f02", "f03", "f04", "f05")
+tableB <- tibble::rownames_to_column(tableB, "Forwards")
+
+## Part B Figure 1
+# Ignore warning
+tableB  %>%
+  mutate(Forwards = fct_relevel(name = Forwards, c("y01",
+                                                   "f02", "f03", "f04", "f05"))) %>%
+  melt(id.vars = c("Forwards")) %>% 
+  ggplot() +
+  geom_point(aes(x = Forwards, y = value, col = variable),
+             alpha = 0.5) +
+  geom_line(aes(x = Forwards, y = value, col = variable, group = variable),
+            alpha = 0.8) +
+  ggtitle("Figure 2. Restricted model coefficients (reproduced)") +
+  labs(col = "Bond Maturities") + 
+  xlab("Forward Rate Maturities") + ylab("Beta Values") + 
+  theme_bw() +
+  theme(text = element_text(size = 15, face = "bold"),
+        legend.position = c(0.8675, 0.85))
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+########################################
+### 1.3 Table 1 Recreation Panel A
+########################################
+
+## OLS estimates are taken from mgamma coefficients, and so is the R-squared
+
+## Newey West 18 lag estimator is required 
+## WARNING!!! (not sure about this part)
+c <- coeftest(mgamma, vcov = NeweyWest)
+
+########################################
+### 1.3 Table 1 Recreation Panel B
+########################################
+
+## Extracting restricted r.squared
+rm02r <- summary(m02r)$r.squared
+rm03r <- summary(m03r)$r.squared
+rm04r <- summary(m04r)$r.squared
+rm05r <- summary(m05r)$r.squared
+
+## Extracting Unrestricted r.squared
+rm02 <- summary(m02)$r.squared
+rm03 <- summary(m03)$r.squared
+rm04 <- summary(m04)$r.squared
+rm05 <- summary(m05)$r.squared
+
+## WARNING!!! Need to check again what large T means
+sd02r <- sqrt(diag(vcov(m02r)))[2]
+sd03r <- sqrt(diag(vcov(m03r)))[2]
+sd04r <- sqrt(diag(vcov(m04r)))[2]
+sd05r <- sqrt(diag(vcov(m05r)))[2]
+
+###########################################
+### 1.4 Table 2 - Fama-Bliss Excess Returns
+###########################################
+
+## Getting forward spreads, reference pag 145 Cochrane Piazzesi
+regdata$fb.s02 <- regdata$fb.f02 - regdata$fb.y02
+regdata$fb.s03 <- regdata$fb.f03 - regdata$fb.y03
+regdata$fb.s04 <- regdata$fb.f04 - regdata$fb.y04
+regdata$fb.s05 <- regdata$fb.f05 - regdata$fb.y05
+
+## Regression on forward spreads
+fb02 <- lm(fb.rx02 ~ fb.s02, data = na.omit(regdata))
+fb03 <- lm(fb.rx02 ~ fb.s03, data = na.omit(regdata))
+fb04 <- lm(fb.rx02 ~ fb.s04, data = na.omit(regdata))
+fb05 <- lm(fb.rx02 ~ fb.s05, data = na.omit(regdata))
+
+## Extracting r.squared
+rfb02 <- summary(fb02)$r.squared
+rfb03 <- summary(fb03)$r.squared
+rfb04 <- summary(fb04)$r.squared
+rfb05 <- summary(fb05)$r.squared
+
+## Extracting coefficients
+bfb02 <- coef(fb02)[2]
+bfb03 <- coef(fb03)[2]
+bfb04 <- coef(fb04)[2]
+bfb05 <- coef(fb05)[2]
+
+## Extracting standard error with Newey-West bs
+nwfb02 <- coeftest(fb02, vcov = NeweyWest)[2, 2]
+nwfb03 <- coeftest(fb03, vcov = NeweyWest)[2, 2]
+nwfb04 <- coeftest(fb04, vcov = NeweyWest)[2, 2]
+nwfb05 <- coeftest(fb05, vcov = NeweyWest)[2, 2]
+
+```
+
+\begin{table}[h!]
+\centering
+\caption{Estimates of the Single-Factor Model (Reproduced)}
+\begin{tabular}{rrrrrrrrr}
+\hline
+\hline
+\multicolumn{9}{c}{A. Estimates of the return-forecasting factor, $\overline{rx}_{t+1}$ = $\gamma^\intercal f_t$ + $\overline{\epsilon}_{t+1}$} \\[2ex]
+ & $\gamma_0$ & $\gamma_1$ & $\gamma_2$ & $\gamma_3$ & $\gamma_4$ & $\gamma_5$ & $R^2$ & $\chi^2(5)$\\
+\hline
+OLS estimates & -3.23 & -1.99 &0.47 & 2.93 & 0.88 & -1.894  & 0.34 &  \\ 
+\multicolumn{9}{c}{Asymptotic (Large T) distribution} \\[2ex]
+\hline
+ &  & & &  &  &  & &  \\ 
+NW, 18 lags & (1.53) & (0.36) & (0.65) & (0.56) & (0.46) & (0.47) & & 94.0 \\ 
+\hline
+\multicolumn{9}{c}{B. Individual-bond regressions} \\[2ex]
+\multicolumn{5}{c}{Restricted, $rx^{(n)}_{t+1} = b_n(\gamma^\intercal_t f_t) + \epsilon_{t+1}^{(n)}$} & 
+\multicolumn{4}{c}{Unrestricted, $rx^{(n)}_{t+1} = \beta_nf_t + \epsilon_{t+1}^{(n)}$} \\[2ex]
+\hline
+\hline
+n & $b_n$ & Large $T$ & $R^2$ &  &  & & $R^2$ &   \\
+\hline
+2 &  0.45 & (0.03) & 0.30 &  &  & & 0.32 &  \\
+3 & 0.85 & (0.05) & 0.32 &  &  & & 0.33 &  \\
+4 & 1.24 & (0.07) & 0.36 &  &  & &  0.36 &  \\
+5 & 1.46 & (0.09)  & 0.33 &  &  & & 0.34 &  \\
+\hline
+\hline
+\end{tabular}
+\end{table}
+
+\begin{table}[h!]
+\centering
+\caption{Fama-Bliss Excess Return Regression}
+\begin{tabular}{rrrr}
+\hline
+\hline
+Maturity n & $\beta$ & NW & $R^2$ \\
+2 & 0.97 & (0.26) & 0.15\\
+3 & 1.29 & (0.34) & 0.16 \\
+4 & 1.52 & (0.42) & 0.17\\
+5 & 1.19 & (0.53) & 0.08 \\
+\hline
+\hline
+\end{tabular}
+\end{table}
+
+\newpage
+
+# Task 2
+
+### Redo the analysis for the original time period (Jan 1964 – Dec 2003)but use Gurkaynak-Sack-Wright yields. How do results change?
+
+In order to check the robustness of the results from Cochrane and Piazzesi(2005) we use the Gurkaynak-Sack-Wright yields and redo the same analysis with the new data. This panel represents the $\beta$ estimates from the unrestricted regressions. We have the same independent factors with 4 forward rates for the 4 different bonds' maturities. From the plotted $\beta$ estimates we again notice that the factor loadings move in a similar way to each other. This time, however, the "tent-shape" is not so clearly visible as now 2-year forward has the highest loadings and the following forwards' coefficients do not decrease linearly. In fact, 5-year forward rate has $\beta$ estimates comparable to 3-year forward.
+
+
+```{r, include=FALSE, warning = FALSE}
+
+load("data_assignment_2.RData")
+
+## Every piece of data manipulation follows Cochrane and Piazzesi page {140, 141}
+GSWdata <- GSWm[, 1:6]
+GSWdata$ymd <- GSWdata$ym
+GSWdata <- subset(GSWdata, select= -ym)
+## Reusable function later on for the second task (pay attention to indexes!!)
+price_maker <- function(dataframe, start_ind, end_ind){
+  
+  for(i in start_ind:(end_ind)){ # Note we are taking each yield column denoted by index
+    # For naming later on
+    varname <- paste0("fb.p0", i)
+    
+    # Get a new column with the prices for the specified maturity
+    dataframe <- dataframe %>%
+      dplyr::mutate(!!varname := dataframe[, i] * (-1) * (i))
+  }
+  
+  return(dataframe)
+}
+
+## Here we get the dataframe with the prices included
+GSWdata <- price_maker(dataframe = GSWdata, start_ind = 1, end_ind = 5)
+
+## Getting the forward rates on a monthly basis
+GSWdata$fb.f02 <-  GSWdata$fb.p01 - GSWdata$fb.p02
+GSWdata$fb.f03 <-  GSWdata$fb.p02 - GSWdata$fb.p03
+GSWdata$fb.f04 <-  GSWdata$fb.p03 - GSWdata$fb.p04
+GSWdata$fb.f05 <-  GSWdata$fb.p04 - GSWdata$fb.p05
+
+## Get *yearly* returns, reasoning is contained in second line page 138 Cochrane
+# "We run regressions of one-year excess returns". Hence the assumption of 
+# needing a 1 year lag for return calculation. t is assumed to be monthly nevertheless.
+GSWdata$fb.r02 <- lead(GSWdata$fb.p01, 12) - GSWdata$fb.p02
+GSWdata$fb.r03 <- lead(GSWdata$fb.p02, 12) - GSWdata$fb.p03
+GSWdata$fb.r04 <- lead(GSWdata$fb.p03, 12) - GSWdata$fb.p04
+GSWdata$fb.r05 <- lead(GSWdata$fb.p04, 12) - GSWdata$fb.p05
+
+## Get *Yearly* excess returns 
+GSWdata$fb.rx02 <- GSWdata$fb.r02 - GSWdata$GSW.y01
+GSWdata$fb.rx03 <- GSWdata$fb.r03 - GSWdata$GSW.y01
+GSWdata$fb.rx04 <- GSWdata$fb.r04 - GSWdata$GSW.y01
+GSWdata$fb.rx05 <- GSWdata$fb.r05 - GSWdata$GSW.y01
+```
+
+```{r, include=FALSE, warning=FALSE}
+########################################
+### 2.1 Figure 1 Part A
+########################################
+
+## We need to take data from 1964 January to 2003 December
+upper <- as.yearmon("2003-12")
+lower <- as.yearmon("1964-01")
+
+## Filter Data
+GSW_regdata <- GSWdata %>% 
+  filter(ymd <= upper & ymd >= lower)
+
+## Regressions
+m02 <- lm(fb.rx02 ~ GSW.y01 + fb.f02 + fb.f03 + fb.f04 + fb.f05, data = na.omit(GSW_regdata))
+m03 <- lm(fb.rx03 ~ GSW.y01 + fb.f02 + fb.f03 + fb.f04 + fb.f05, data = na.omit(GSW_regdata))
+m04 <- lm(fb.rx04 ~ GSW.y01 + fb.f02 + fb.f03 + fb.f04 + fb.f05, data = na.omit(GSW_regdata))
+m05 <- lm(fb.rx05 ~ GSW.y01 + fb.f02 + fb.f03 + fb.f04 + fb.f05, data = na.omit(GSW_regdata))
+
+tableA <- as.data.frame(cbind(coef(m02)[2:6], coef(m03)[2:6], coef(m04)[2:6], coef(m05)[2:6]))
+colnames(tableA) <- c("2", "3", "4", "5")
+rownames(tableA) <- c("y01", "f02", "f03", "f04", "f05")
+
+## Plotting table
+tableA <- tibble::rownames_to_column(tableA, "Forwards")
+```
+
+```{r, echo=FALSE}
+## Part A Figure 1
+# Ignore warning
+tableA <- tableA %>%
+  mutate(Forwards = fct_relevel(Forwards, "y01", "f02", "f03", "f04", "f05")) %>%
+  gather(variable, value, -Forwards) 
+
+ggplot(tableA, aes(x = Forwards, y = value, col = variable, group = variable)) +
+  geom_point(alpha = 0.5) +
+  geom_line(alpha = 0.8) +
+    ggtitle("Figure 3. Non-restricted model coefficients (Gurkaynak-Sack-Wright yields)") +
+  labs(col = "Bond Maturities", x = "Forward Rate Maturities", y = "Beta Values") +
+  theme_bw() +
+  theme(text = element_text(size = 15, face = "bold"),
+        legend.position = c(0.8675, 0.85))
+```
+
+```{r, include=FALSE, warning=FALSE}
+########################################
+### 2.2 Figure 1 Part B
+########################################
+## Estimation of equation (2) page 142 Cochrane
+GSW_regdata$mean_rx <- rowMeans(GSW_regdata[, 20:23])
+
+## Regression on average return across bond maturities
+mgamma <- lm(mean_rx ~ GSW.y01 + fb.f02 + fb.f03 + fb.f04 + fb.f05, data = na.omit(GSW_regdata))
+gammas <- coef(mgamma)
+
+summary(mgamma)
+## Linear Combination of Forwards and 1-Year Yield
+GSW_regdata$fb.fgamma <- gammas[1] + gammas[2] * GSW_regdata$GSW.y01 + gammas[3] * GSW_regdata$fb.f02 + gammas[4] * GSW_regdata$fb.f03 + gammas[5] * GSW_regdata$fb.f04 + gammas[6] * GSW_regdata$fb.f05
+
+## Restricted regression
+m02r <- lm(fb.rx02 ~ fb.fgamma, data = na.omit(GSW_regdata))
+m03r <- lm(fb.rx03 ~ fb.fgamma, data = na.omit(GSW_regdata))
+m04r <- lm(fb.rx04 ~ fb.fgamma, data = na.omit(GSW_regdata))
+m05r <- lm(fb.rx05 ~ fb.fgamma, data = na.omit(GSW_regdata))
+
+## Betas from restricted regression
+b02 <- coef(m02r)[2]
+b03 <- coef(m03r)[2]
+b04 <- coef(m04r)[2]
+b05 <- coef(m05r)[2]
+```
+
+```{r, echo = FALSE}
+## Plotting Table
+tableB <- as.data.frame(cbind(gammas[2:6] * b02, gammas[2:6] * b03, gammas[2:6] * b04, gammas[2:6] * b05))
+colnames(tableB) <- c("2", "3", "4", "5")
+rownames(tableB) <- c("y01", "f02", "f03", "f04", "f05")
+tableB <- tibble::rownames_to_column(tableB, "Forwards")
+
+## Part B Figure 1
+# Ignore warning
+tableB <- tableB %>%
+  mutate(Forwards = fct_relevel(Forwards, "y01", "f02", "f03", "f04", "f05")) %>%
+  gather(variable, value, -Forwards)
+
+ggplot(tableB, aes(x = Forwards, y = value, col = variable, group = variable)) +
+  geom_point(alpha = 0.5) +
+  geom_line(alpha = 0.8) +
+  ggtitle("Figure 4. Restricted model coefficients (Gurkaynak-Sack-Wright yields)") +
+  labs(col = "Bond Maturities", x = "Forward Rate Maturities", y = "Beta Values") +
+  theme_bw() +
+  theme(text = element_text(size = 15, face = "bold"),
+        legend.position = c(0.8675, 0.85))
+```
+
+\pagebreak
+
+For the restricted regression by using the linearly combined independent variable we obtain similar results, as 2-year forward rates still have the highest $\beta$ estimates. However, now the $\beta$ for both 2- and 3-year forward rates become higher with longer bond maturites i.e. 5-year maturity bond has the highest loading on these 2-3 years forward rates. 
+
+According to the data presented in the tables with the parameters estimators, we still have that for the Fama and Bliss regression models the $R^2$ is severely lower, but now the common quality of all the models is much lower in comparison to Cochrane and Piazzesi(2005). For the excess return regression the $\beta$ parameter drops significantly with higher maturity, but the quality ($R^2$)of the unrestricted and restricted models remain on the same level.
+
+```{r,warning=TRUE, include=FALSE}
+########################################
+### 1.3 Table 1 Recreation Panel A
+########################################
+
+## OLS estimates are taken from mgamma coefficients, and so is the R-squared
+
+## Newey West 18 lag estimator is required 
+## WARNING!!! (not sure about this part)
+c <- coeftest(mgamma, vcov = NeweyWest)
+waldtest(mgamma, vcov = NeweyWest)
+c
+########################################
+### 1.3 Table 1 Recreation Panel B
+########################################
+
+## Extracting restricted r.squared
+rm02r <- summary(m02r)$r.squared
+rm03r <- summary(m03r)$r.squared
+rm04r <- summary(m04r)$r.squared
+rm05r <- summary(m05r)$r.squared
+
+## Extracting Unrestricted r.squared
+rm02 <- summary(m02)$r.squared
+rm03 <- summary(m03)$r.squared
+rm04 <- summary(m04)$r.squared
+rm05 <- summary(m05)$r.squared
+
+## Need to check again what large T means
+sd02r <- sqrt(diag(vcov(m02r)))[2]
+sd03r <- sqrt(diag(vcov(m03r)))[2]
+sd04r <- sqrt(diag(vcov(m04r)))[2]
+sd05r <- sqrt(diag(vcov(m05r)))[2]
+
+###########################################
+### 1.4 Table 2 - Fama-Bliss Excess Returns
+###########################################
+
+## Getting forward spreads, reference pag 145 Cochrane Piazzesi
+GSW_regdata$fb.s02 <- GSW_regdata$fb.f02 - GSW_regdata$GSW.y02
+GSW_regdata$fb.s03 <- GSW_regdata$fb.f03 - GSW_regdata$GSW.y03
+GSW_regdata$fb.s04 <- GSW_regdata$fb.f04 - GSW_regdata$GSW.y04
+GSW_regdata$fb.s05 <- GSW_regdata$fb.f05 - GSW_regdata$GSW.y05
+
+## Regression on forward spreads
+fb02 <- lm(fb.rx02 ~ fb.s02, data = na.omit(GSW_regdata))
+fb03 <- lm(fb.rx02 ~ fb.s03, data = na.omit(GSW_regdata))
+fb04 <- lm(fb.rx02 ~ fb.s04, data = na.omit(GSW_regdata))
+fb05 <- lm(fb.rx02 ~ fb.s05, data = na.omit(GSW_regdata))
+
+## Extracting r.squared
+rfb02 <- summary(fb02)$r.squared
+rfb03 <- summary(fb03)$r.squared
+rfb04 <- summary(fb04)$r.squared
+rfb05 <- summary(fb05)$r.squared
+
+## Extracting coefficients
+bfb02 <- coef(fb02)[2]
+bfb03 <- coef(fb03)[2]
+bfb04 <- coef(fb04)[2]
+bfb05 <- coef(fb05)[2]
+
+## Extracting standard error with Newey-West bs
+nwfb02 <- coeftest(fb02, vcov = NeweyWest)[2, 2]
+nwfb03 <- coeftest(fb03, vcov = NeweyWest)[2, 2]
+nwfb04 <- coeftest(fb04, vcov = NeweyWest)[2, 2]
+nwfb05 <- coeftest(fb05, vcov = NeweyWest)[2, 2]
+```
+
+\begin{table}[h!]
+\centering
+\caption{Estimates of the Single-Factor Model for Gurkaynak-Sack-Wright yields}
+\begin{tabular}{rrrrrrrrr}
+\hline
+\hline
+\multicolumn{9}{c}{A. Estimates of the return-forecasting factor, $\overline{rx}_{t+1}$ = $\gamma^\intercal f_t$ + $\overline{\epsilon}_{t+1}$} \\[2ex]
+ & $\gamma_0$ & $\gamma_1$ & $\gamma_2$ & $\gamma_3$ & $\gamma_4$ & $\gamma_5$ & $R^2$ & $\chi^2(5)$\\
+\hline
+OLS estimates & -1.15 & -1.29 & -0.36 & 1.78 & 1.78 & -1.13  & 0.201 &  \\ 
+\multicolumn{9}{c}{Asymptotic (Large T) distribution} \\[2ex]
+\hline
+ &  & & &  &  &  & &  \\ 
+NW, 18 lags & (1.92) & (0.5) & (0.83) & (0.7) & (0.52) & (0.57) & & 34.72 \\ 
+\hline
+\multicolumn{9}{c}{B. Individual-bond regressions} \\[2ex]
+\multicolumn{5}{c}{Restricted, $rx^{(n)}_{t+1} = b_n(\gamma^\intercal_t f_t) + \epsilon_{t+1}^{(n)}$} & 
+\multicolumn{4}{c}{Unrestricted, $rx^{(n)}_{t+1} = \beta_nf_t + \epsilon_{t+1}^{(n)}$} \\[2ex]
+\hline
+\hline
+n & $b_n$ & Large $T$ & $R^2$ &  &  & & $R^2$ &   \\
+\hline
+2 &  0.44 & (0.04) & 0.199 &  &  & & 0.175 &  \\
+3 & 0.84 & (0.07) & 0.23 &  &  & & 0.19 &  \\
+4 & 1.25 & (0.09) & 0.24 &  &  & &  0.22 &  \\
+5 & 1.7 & (0.11)  & 0.26 &  &  & & 0.195 &  \\
+\hline
+\hline
+\end{tabular}
+\end{table}
+
+\begin{table}[h!]
+\centering
+\caption{Gurkaynak-Sack-Wright Excess Return Regression}
+\begin{tabular}{rrrr}
+\hline
+\hline
+Maturity n & $\beta$ & NW & $R^2$ \\
+2 & 1.57 & (0.55) & 0.1\\
+3 & 0.932 & (0.29) & 0.07 \\
+4 & 0.593 & (0.3) & 0.04\\
+5 & -0.0115 & (0.27) & 0.00002 \\
+\hline
+\hline
+\end{tabular}
+\end{table}
+
+\newpage
+
+### Redo the previous analysis again with Fama-Bliss data, but now extend the data to include recent periods. How do results change?
+
+```{r, include=FALSE}
+load("data_assignment_2.RData")
+
+### Now we do the same code from exercise 1, but delete the upper limit for data 
+price_maker <- function(dataframe, start_ind, end_ind){
+  
+  for(i in start_ind:(end_ind)){ # Note we are taking each yield column denoted by index
+    # For naming later on
+    varname <- paste0("fb.p0", i)
+    
+    # Get a new column with the prices for the specified maturity
+    dataframe <- dataframe %>%
+      dplyr::mutate(!!varname := dataframe[, i] * (-1) * (i))
+  }
+  
+  return(dataframe)
+}
+## Here we get the dataframe with the prices included
+FBm <- price_maker(dataframe = FBm, start_ind = 1, end_ind = 5)
+
+## Getting the forward rates on a monthly basis
+FBm$fb.f02 <-  FBm$fb.p01 - FBm$fb.p02
+FBm$fb.f03 <-  FBm$fb.p02 - FBm$fb.p03
+FBm$fb.f04 <-  FBm$fb.p03 - FBm$fb.p04
+FBm$fb.f05 <-  FBm$fb.p04 - FBm$fb.p05
+
+## Get *yearly* returns, reasoning is contained in second line page 138 Cochrane
+FBm$fb.r02 <- lead(FBm$fb.p01, 12) - FBm$fb.p02
+FBm$fb.r03 <- lead(FBm$fb.p02, 12) - FBm$fb.p03
+FBm$fb.r04 <- lead(FBm$fb.p03, 12) - FBm$fb.p04
+FBm$fb.r05 <- lead(FBm$fb.p04, 12) - FBm$fb.p05
+
+## Get *Yearly* excess returns 
+FBm$fb.rx02 <- FBm$fb.r02 - FBm$fb.y01
+FBm$fb.rx03 <- FBm$fb.r03 - FBm$fb.y01
+FBm$fb.rx04 <- FBm$fb.r04 - FBm$fb.y01
+FBm$fb.rx05 <- FBm$fb.r05 - FBm$fb.y01
+
+########################################
+### 2.2 Figure 1 Part A
+########################################
+lower <- as.yearmon("1964-01")
+
+## Filter Data
+regdata <- FBm %>% 
+  filter(ym >= lower)
+
+## Regressions
+m02 <- lm(fb.rx02 ~ fb.y01 + fb.f02 + fb.f03 + fb.f04 + fb.f05, data = na.omit(regdata))
+m03 <- lm(fb.rx03 ~ fb.y01 + fb.f02 + fb.f03 + fb.f04 + fb.f05, data = na.omit(regdata))
+m04 <- lm(fb.rx04 ~ fb.y01 + fb.f02 + fb.f03 + fb.f04 + fb.f05, data = na.omit(regdata))
+m05 <- lm(fb.rx05 ~ fb.y01 + fb.f02 + fb.f03 + fb.f04 + fb.f05, data = na.omit(regdata))
+
+tableA <- as.data.frame(cbind(coef(m02)[2:6], coef(m03)[2:6], coef(m04)[2:6], coef(m05)[2:6]))
+colnames(tableA) <- c("2", "3", "4", "5")
+rownames(tableA) <- c("y01", "f02", "f03", "f04", "f05")
+```
+
+By introducing a larger sample for Fama and Bliss yields we bring forward the reproduction of the first figure one more time. On this panel we can observe that the previous conclusions are about to change, as we now do not have "tent-shaped" results for the bonds with maturities over 2 years.
+
+```{r, echo=FALSE}
+## Plotting table
+tableA <- tibble::rownames_to_column(tableA, "Forwards")
+
+## Part A Figure 1
+# Ignore warning
+tableA <- tableA %>%
+  mutate(Forwards = fct_relevel(Forwards, "y01", "f02", "f03", "f04", "f05")) %>%
+  gather(variable, value, -Forwards) 
+
+ggplot(tableA, aes(x = Forwards, y = value, col = variable, group = variable)) +
+  geom_point(alpha = 0.5) +
+  geom_line(alpha = 0.8) +
+  ggtitle("Figure 5. Non-restricted model coefficients (extended period)") +
+  labs(col = "Bond Maturities", x = "Forward Rate Maturities", y = "Beta Values") +
+  theme_bw() +
+  theme(text = element_text(size = 15, face = "bold"),
+        legend.position = c(0.8675, 0.85))
+```
+
+```{r, include=FALSE, warning=FALSE}
+########################################
+### 2.2.1 Figure 1 Part B
+########################################
+## Estimation of equation (2) page 142 Cochrane
+regdata$mean_rx <- rowMeans(regdata[, 20:23])
+
+## Regression on average return across bond maturities
+mgamma <- lm(mean_rx ~ fb.y01 + fb.f02 + fb.f03 + fb.f04 + fb.f05, data = na.omit(regdata))
+gammas <- coef(mgamma)
+
+summary(mgamma)
+## Linear Combination of Forwards and 1-Year Yield
+regdata$fb.fgamma <- gammas[1] + gammas[2] * regdata$fb.y01 + gammas[3] * regdata$fb.f02 + gammas[4] * regdata$fb.f03 + gammas[5] * regdata$fb.f04 + gammas[6] * regdata$fb.f05
+
+## Restricted regression
+m02r <- lm(fb.rx02 ~ fb.fgamma, data = na.omit(regdata))
+m03r <- lm(fb.rx03 ~ fb.fgamma, data = na.omit(regdata))
+m04r <- lm(fb.rx04 ~ fb.fgamma, data = na.omit(regdata))
+m05r <- lm(fb.rx05 ~ fb.fgamma, data = na.omit(regdata))
+
+## Betas from restricted regression
+b02 <- coef(m02r)[2]
+b03 <- coef(m03r)[2]
+b04 <- coef(m04r)[2]
+b05 <- coef(m05r)[2]
+
+## Plotting Table
+tableB <- as.data.frame(cbind(gammas[2:6] * b02, gammas[2:6] * b03, gammas[2:6] * b04, gammas[2:6] * b05))
+colnames(tableB) <- c("2", "3", "4", "5")
+rownames(tableB) <- c("y01", "f02", "f03", "f04", "f05")
+tableB <- tibble::rownames_to_column(tableB, "Forwards")
+```
+
+In the restricted regression for extended time period the results of the $\beta$ loadings do not change drastically. As can be seen on the graph, loadings for the 2-4 years forward rates have changed significantly. Most noticibly, the $\beta$ estimates on 3-years forwrds have decreased and the "tent-shape" is skewed to the right.
+
+```{r, echo=FALSE}
+## Part B Figure 1
+# Ignore warning
+tableB <- tableB %>%
+  mutate(Forwards = fct_relevel(Forwards, "y01", "f02", "f03", "f04", "f05")) %>%
+  gather(variable, value, -Forwards)
+
+ggplot(tableB, aes(x = Forwards, y = value, col = variable, group = variable)) +
+  geom_point(alpha = 0.5) +
+  geom_line(alpha = 0.8) +
+  ggtitle("Figure 6. Restricted model coefficients (extended period)") +
+  labs(col = "Bond Maturities", x = "Forward Rate Maturities", y = "Beta Values") +
+  theme_bw() +
+  theme(text = element_text(size = 15, face = "bold"),
+        legend.position = c(0.8675, 0.85))
+```
+
+In comparison to the original data period the $\beta$ coefficients of the both regressions, we do not observe a lot of differences. However, we can mention that the quality of the models $(R^2)$ dropped significantly. Thus, by increasing the size of the dataframe we have the reduced $R^2$ values, so the existing models predict the estimated excess returns worse on a longer timeframe. Fama-Bliss Excess Return Regression betas' structure changed significantly too, as now instead of the "tent-shaped" structure of coefficients we observe domination of the shorter maturities and lower predictability quality.
+
+```{r, include=FALSE, warning=FALSE}
+########################################
+### 2.2.3 Table 1 Recreation Panel A
+########################################
+
+## OLS estimates are taken from mgamma coefficients, and so is the R-squared
+
+## Newey West 18 lag estimator is required 
+c <- coeftest(mgamma, vcov = NeweyWest)
+waldtest(mgamma, vcov = NeweyWest)
+c
+########################################
+### 2.2.3 Table 1 Recreation Panel B
+########################################
+
+## Extracting restricted r.squared
+rm02r <- summary(m02r)$r.squared
+rm03r <- summary(m03r)$r.squared
+rm04r <- summary(m04r)$r.squared
+rm05r <- summary(m05r)$r.squared
+
+## Extracting Unrestricted r.squared
+rm02 <- summary(m02)$r.squared
+rm03 <- summary(m03)$r.squared
+rm04 <- summary(m04)$r.squared
+rm05 <- summary(m05)$r.squared
+
+##Need to check again what large T means
+sd02r <- sqrt(diag(vcov(m02r)))[2]
+sd03r <- sqrt(diag(vcov(m03r)))[2]
+sd04r <- sqrt(diag(vcov(m04r)))[2]
+sd05r <- sqrt(diag(vcov(m05r)))[2]
+
+###########################################
+### 2.2.4 Table 2 - Fama-Bliss Excess Returns
+###########################################
+
+## Getting forward spreads, reference page 145 Cochrane Piazzesi
+regdata$fb.s02 <- regdata$fb.f02 - regdata$fb.y02
+regdata$fb.s03 <- regdata$fb.f03 - regdata$fb.y03
+regdata$fb.s04 <- regdata$fb.f04 - regdata$fb.y04
+regdata$fb.s05 <- regdata$fb.f05 - regdata$fb.y05
+
+## Regression on forward spreads
+fb02 <- lm(fb.rx02 ~ fb.s02, data = na.omit(regdata))
+fb03 <- lm(fb.rx02 ~ fb.s03, data = na.omit(regdata))
+fb04 <- lm(fb.rx02 ~ fb.s04, data = na.omit(regdata))
+fb05 <- lm(fb.rx02 ~ fb.s05, data = na.omit(regdata))
+
+## Extracting r.squared
+rfb02 <- summary(fb02)$r.squared
+rfb03 <- summary(fb03)$r.squared
+rfb04 <- summary(fb04)$r.squared
+rfb05 <- summary(fb05)$r.squared
+
+## Extracting coefficients
+bfb02 <- coef(fb02)[2]
+bfb03 <- coef(fb03)[2]
+bfb04 <- coef(fb04)[2]
+bfb05 <- coef(fb05)[2]
+
+## Extracting standard error with Newey-West bs
+nwfb02 <- coeftest(fb02, vcov = NeweyWest)[2, 2]
+nwfb03 <- coeftest(fb03, vcov = NeweyWest)[2, 2]
+nwfb04 <- coeftest(fb04, vcov = NeweyWest)[2, 2]
+nwfb05 <- coeftest(fb05, vcov = NeweyWest)[2, 2]
+```
+
+
+\begin{table}[h!]
+\centering
+\caption{Estimates of the Single-Factor Model with extended time period (Reproduced)}
+\begin{tabular}{rrrrrrrrr}
+\hline
+\hline
+\multicolumn{9}{c}{A. Estimates of the return-forecasting factor, $\overline{rx}_{t+1}$ = $\gamma^\intercal f_t$ + $\overline{\epsilon}_{t+1}$} \\[2ex]
+ & $\gamma_0$ & $\gamma_1$ & $\gamma_2$ & $\gamma_3$ & $\gamma_4$ & $\gamma_5$ & $R^2$ & $\chi^2(5)$\\
+\hline
+OLS estimates & -3.06 & -2.86 & 3.51 & 0.59 & -1.61 & 0.74  & 0.24 &  \\ 
+\multicolumn{9}{c}{Asymptotic (Large T) distribution} \\[2ex]
+\hline
+ &  & & &  &  &  & &  \\ 
+NW, 18 lags & (2.3) & (0.66) & (5.65) & (17.49) & (21.39) & (9.39) & & 30.29 \\ 
+\hline
+\multicolumn{9}{c}{B. Individual-bond regressions} \\[2ex]
+\multicolumn{5}{c}{Restricted, $rx^{(n)}_{t+1} = b_n(\gamma^\intercal_t f_t) + \epsilon_{t+1}^{(n)}$} & 
+\multicolumn{4}{c}{Unrestricted, $rx^{(n)}_{t+1} = \beta_nf_t + \epsilon_{t+1}^{(n)}$} \\[2ex]
+\hline
+\hline
+n & $b_n$ & Large $T$ & $R^2$ &  &  & & $R^2$ &   \\
+\hline
+2 &  0.43 & (0.04) & 0.199 &  &  & & 0.2 &  \\
+3 & 0.83 & (0.07) & 0.23 &  &  & & 0.23 &  \\
+4 & 1.19 & (0.1) & 0.24 &  &  & &  0.24 &  \\
+5 & 1.54 & (0.12)  & 0.26 &  &  & & 0.26 &  \\
+\hline
+\hline
+\end{tabular}
+\end{table}
+
+\begin{table}[h!]
+\centering
+\caption{Fama-Bliss Excess Return Regression with extended time period}
+\begin{tabular}{rrrr}
+\hline
+\hline
+Maturity n & $\beta$ & NW & $R^2$ \\
+2 & 1.89 & (0.58) & 0.12\\
+3 & 1.08 & (0.49) & 0.07 \\
+4 & 0.742 & (0.49) & 0.04\\
+5 & 0.543 & (0.503) & 0.02 \\
+\hline
+\hline
+\end{tabular}
+\end{table}
+
+\newpage
+
+### Perform an out-of-sample validation exercise, again using Fama-Bliss data.
+
+For out-of sample validation exercise we use the OOS prediction from Campbell and Thomson (2008) we have a formula:
+
+$$R^2_{OOS} = 1 - \frac{\sum_{t=t_0}^T (r_t - \hat{r}_t)^2}{\sum_{t=t_0}^T (r_t - \bar{r}_t)^2}$$
+
+For the Fama Bliss data we have taken value of the restricted regression as the estimated (predicted) value. Thus, we compare the restrictied model of using linear combination of the forward rates with using the mean value of the previous excess returns.
+
+$R^2_{OOS}$ shows how good our regression model is in comparison to the benchmark which in this case is the model using the mean value. Differently from normal $R^2$ the out-of-sample one can be changing from $-\infty$ to 1, where values from 0 to 1 mean that our model is better than the benchmark and values below $0$ show that our model estimation is worse than the benchmark.
+
+Table 7 shows that all our estimates are negative which supports the hypothesis that our models perform worse than the average value benchmark, as the quality of our predictions dropped after increasing the timeframe. The $R_{OOS}$ does not depend on the maturity of the bonds, but we could observe that for shorter forward rates maturities the predictions are the best. 
+
+```{r, include = FALSE, warning=FALSE}
+## Regression on average return across bond maturities
+mgamma <- lm(mean_rx ~ fb.y01 + fb.f02 + fb.f03 + fb.f04 + fb.f05, data = na.omit(regdata))
+gammas <- coef(mgamma)
+
+regdata$fb.fgamma <- gammas[1] + gammas[2] * regdata$fb.y01 + gammas[3] * regdata$fb.f02 + gammas[4] * regdata$fb.f03 + gammas[5] * regdata$fb.f04 + gammas[6] * regdata$fb.f05
+
+regdata$fb.rx02.predicted <- regdata$fb.rx02
+regdata[481:nrow(regdata), "fb.rx02.predicted"] <- NA
+
+for (i in 481:708) {
+  m02r <- lm(fb.rx02.predicted ~ fb.fgamma, data = na.omit(regdata[1:i-1,]))
+  regdata$fb.rx02.predicted[i] <- predict(m02r, newdata = regdata[i:nrow(regdata),])[1]
+}
+
+regdata$fb.rx03.predicted <- regdata$fb.rx03
+regdata[481:nrow(regdata), "fb.rx03.predicted"] <- NA
+
+for (i in 481:708) {
+  m03r <- lm(fb.rx03.predicted ~ fb.fgamma, data = na.omit(regdata[1:i-1,]))
+  regdata$fb.rx03.predicted[i] <- predict(m03r, newdata = regdata[i:nrow(regdata),])[1]
+}
+
+regdata$fb.rx04.predicted <- regdata$fb.rx04
+regdata[481:nrow(regdata), "fb.rx04.predicted"] <- NA
+
+for (i in 481:708) {
+  m04r <- lm(fb.rx04.predicted ~ fb.fgamma, data = na.omit(regdata[1:i-1,]))
+  regdata$fb.rx04.predicted[i] <- predict(m04r, newdata = regdata[i:nrow(regdata),])[1]
+}
+
+regdata$fb.rx05.predicted <- regdata$fb.rx05
+regdata[481:nrow(regdata), "fb.rx05.predicted"] <- NA
+
+for (i in 481:708) {
+  m05r <- lm(fb.rx05.predicted ~ fb.fgamma, data = na.omit(regdata[1:i-1,]))
+  regdata$fb.rx05.predicted[i] <- predict(m05r, newdata = regdata[i:nrow(regdata),])[1]
+}
+
+regdata$prediction_error_rx02 <- (regdata$fb.rx02 - regdata$fb.rx02.predicted)^2
+regdata$prediction_error_rx03 <- (regdata$fb.rx03 - regdata$fb.rx03.predicted)^2
+regdata$prediction_error_rx04 <- (regdata$fb.rx04 - regdata$fb.rx04.predicted)^2
+regdata$prediction_error_rx05 <- (regdata$fb.rx05 - regdata$fb.rx05.predicted)^2
+
+
+# Calculate the mean of previous values and assign to the new column
+for (i in 2:nrow(regdata)) {
+  regdata$mean_value_rx02[i] <- mean(regdata$fb.rx02[1:(i-1)])
+}
+
+for (i in 2:nrow(regdata)) {
+  regdata$mean_value_rx03[i] <- mean(regdata$fb.rx03[1:(i-1)])
+}
+
+for (i in 2:nrow(regdata)) {
+  regdata$mean_value_rx04[i] <- mean(regdata$fb.rx04[1:(i-1)])
+}
+
+for (i in 2:nrow(regdata)) {
+  regdata$mean_value_rx05[i] <- mean(regdata$fb.rx05[1:(i-1)])
+}
+
+regdata$average_error_rx02 <- (regdata$fb.rx02 - regdata$mean_value_rx02)^2
+regdata$average_error_rx03 <- (regdata$fb.rx03 - regdata$mean_value_rx03)^2
+regdata$average_error_rx04  <- (regdata$fb.rx04 - regdata$mean_value_rx04)^2
+regdata$average_error_rx05  <- (regdata$fb.rx05 - regdata$mean_value_rx05)^2
+
+R_OS2 <-  1 - sum(na.omit(regdata[481:nrow(regdata), c("prediction_error_rx02")]))/sum(na.omit(regdata[481:nrow(regdata), c("average_error_rx02")]))
+
+R_OS3 <-  1 - sum(na.omit(regdata[481:nrow(regdata), c("prediction_error_rx03")]))/sum(na.omit(regdata[481:nrow(regdata), c("average_error_rx03")]))
+
+R_OS4 <-  1 - sum(na.omit(regdata[481:nrow(regdata), c("prediction_error_rx04")]))/sum(na.omit(regdata[481:nrow(regdata), c("average_error_rx04")]))
+
+R_OS5 <-  1 - sum(na.omit(regdata[481:nrow(regdata), c("prediction_error_rx05")]))/sum(na.omit(regdata[481:nrow(regdata), c("average_error_rx05")]))
+```
+
+\begin{table}[h!]
+\centering
+\caption{Out of sample $R^2$ Campbell and Thomson (2008) for different maturities}
+\begin{tabular}{rrrrr}
+\hline
+\hline
+& Maturity 2 & 3 & 4 & 5 \\
+$R_{OOS}$ & -0.403 & -0.515 & -0.615 & -0.592\\
+\hline
+\hline
+\end{tabular}
+\end{table}
+
+\newpage
+
+# Task 3
+
+### What is the main message of Cochrane and Piazzesi (2005)? What do we learn from them beyond the insights from Fama and Bliss (1987)? What is missing?
+
+The concept of the expectations hypothesis encompasses a range of propositions that establish connections between bond yields, returns, and forward rates across different maturity periods. In its early stages during the late 1930s, the expectations hypothesis did not revolve around a single mathematical statement but rather involved the development of several similar hypotheses. These hypotheses emerged from the need to understand the relationship between returns and yields on long-term and short-term bonds, as well as the patterns observed in the term structure over time. (Sangvinatsos 2008)
+
+The key postulate of the expectations hypothesis is that long yields are the average of future expected short yields (which is equivalent to saying that excess returns are not predictable). (Cochrane, Piazzesi 2005)
+
+As appealing in its simplicity as it is, the hypothesis could not be empirically validated with post-war U.S. data. Numerous economists have made attempts to propose models that perform better when tested on real-life data, most of whom relied on three principal components (slope, level and curvature) for modelling term structure. The aim of Cochrane and Piazzesi (2005) was an enhancement to the well-established PCA. Their results were an expansion to / derivative of Fama and Bliss (1987) and Campbell and Shiller (1991) models, both of which had the goal of rejecting the expectation hypothesis.
+
+Fama Bliss discovered that the one-year excess return of an *n*-year bond can be predicted with the spread between the *n*-year forward rate and the one-year yield while Campbell and Shiller obtained comparable findings by predicting yield changes with yield spreads.
+
+Cochrane and Piazzesi (CP) model builds on principal shown in Fama Bliss (FB).  While FB links each maturity bond's expected excess return to a different forward spread, CP uses the same linear combination of forward rates to predict bond returns at every maturity.
+
+To do so CP firstly run a regression of excess returns on all forward rates - the same as has been done by Fama Bliss. 
+$$rx_{t+1}^{(n)} = \beta_0^{(n)} + \beta_1^{(n)}y_t^{(1)} + \beta_2^{(n)}f_t^{(2)} + \dots + \beta_5^{(n)}f_t^{(5)} + \epsilon_{t+1}^{(n)}$$
+
+They plotted the coefficients as a function of maturities and noticed an important characteristic - namely that the holding period returns at all maturities can be predicted with the same function of forward rates. No matter of the forward rate, all the plots had the same tent shape. The only difference was that longer maturities had larger loadings on the same function. 
+
+Cochrane and Piazzesi decided to reduce the model dimensions to a single factor by running a regression of the average excess return on all forward rate and then estimating the coefficients by running four regressions for maturities $n=2,3,4,5$. They arrived at the restricted regression:
+$$rx_{t+1}^{(n)} = b_n (\gamma_0 + \gamma_1y_t^{(1)} + \gamma_2f_t^{(2)} + \dots  + \gamma_5f_t^{(5)} ) + \epsilon_{t+1}^{(n)}$$
+As a result, they notices that the $b_n$ coefficients of expected excess returns on the forecasting factor in CP model increase with maturity - the same way as in original unrestricted FB regression. They concluded that the single-factor model and unrestricted estimates are close both statistically and economically. Therefore, the restriction (i.e. that the same portfolio of forward rates) can predict bonds of each maturity with insignificant damage to forecast ability.
+
+The authors additionally prove that their bond market factor forecasts excess returns in the U.S. stock market, which supports the claim that it is capturing risk premiums.
+
+In summary, the main finding of Cochrane and Piazzesi was that excess returns on one- to five-year maturity bonds do not have to be predicted with different set of forward rates specific for each maturity, rather that they  can be forecast by a single factor - a tent-shaped linear combination of forward rates. Worth noting is the high explanatory power of the model for the given sample period of $R^2$ up to 0.37 (which is an improvement from Fama Bliss (1987) with highest $R^2$ of 0.18).
+
+However, there are numerous aspects missing in CP model. Authors themselves point out that they have considered only these one- to five-year maturity bonds at a one-year horizon so their analysis does not include explanation on how returns and interest rates forecasts change in different investment horizons nor for all possible maturities. Such analysis has been done by Gutierrez, *et.al.* (2020) who tested CP factor using the same data sample and discovered that the return forecasting factor does not perform equally well for holding periods longer than a year or for different maturities. 
+
+Moreover, Cochrane and Piazzesi do not link the premia to macroeconomic or monetary fundamentals, which makes the model less stable in different macroeconomic environment (which can be seen by extending the sample period). Cochrane and Piazzesi's original model focuses solely on U.S. dollars and U.S. bonds, neglecting other currencies and related foreign exchange (FX) markets. This omission overlooks the important interplay between FX markets and the term structure of interest rates. Hodrick and Tomunen (2018) note that a global approach that considers multiple currencies and related FX markets is crucial for a comprehensive analysis. In their analysis however, CP factor performs reasonably well for different currencies up until 2003, but fails to predict the excess returns equally well for data after 2004.  
+
+### How do you interpret the results or your analysis? Are there important insights for investors, issuers, or regulators?
+
+The analysis of Cochrane and Piazzesi (2005) provides valuable insights into the predictability of bond excess returns using forward rates. The main finding suggests that a single factor, represented by a linear combination of forward rates, can predict excess returns on one- to five-year maturity bonds. This result challenges the expectations hypothesis, which posits that long yields are the average of future expected short yields, implying that excess returns should not be predictable. The analysis reproduces the findings of Cochrane and Piazzesi, showing a "tent-shaped" pattern of factor loadings, with the 3-year forward rate having the highest loading across all bond maturities.
+
+However, when extending the analysis to a different dataset or a longer data period, some interesting implications emerge. By using the Gurkaynak-Sack-Wright yields as an alternative dataset, the "tent-shaped" pattern becomes less pronounced, with the 2-year forward rate having the highest loadings in the unrestricted regressions. This suggests that the predictive power of forward rates may vary depending on the dataset used.
+
+Furthermore, when analyzing an extended time period, the results show changes in the factor loadings. The "tent-shaped" structure becomes skewed, and the loadings on the 2- and 3-year forward rates increase with longer bond maturities. Additionally, the overall quality of the models, as measured by the $R^2$ values, decreases when using the extended sample period. This implies that the existing models may have a reduced ability to predict excess returns over a longer timeframe.
+
+These findings highlight the importance of considering the dataset and the time period when conducting empirical analysis. Different datasets may yield different results, indicating the need for robustness checks and replication using alternative data sources. Moreover, extending the sample period can reveal changes in the relationships and predictability of bond excess returns. It is crucial to be cautious in generalizing the results of a specific dataset or time period to other contexts, as market conditions and macroeconomic factors can significantly impact the validity and stability of the predictive models.
+
+The missing aspects and drawbacks of the model (particularly the limited scope of analysis - both in case of short sample period and  consideration of only one- to five-year maturity bonds at a one-year horizon) explored in our analysis and in numerous papers by recognized economists indicate that investors and issuers should exercise caution when applying the CP factor to investment decisions beyond the specific scope examined in Cochrane and Piazzesi's study. Therefore, the analyzed model may help the market players to enhance their predictions but it should not be considered as the baseline for their decisions. 
+
+\newpage
+
+# Bibliography
+
+Campbell, John Y., and Samuel B. Thompson (2008), *Predicting Excess Stock Returns Out of Sample: Can Anything Beat the Historical Average?*, The Review of Financial Studies 21(4), 1509—1531.
+
+Cochrane, John, and Piazzesi, Monika (2005), *Bond risk premia*, American Economic Review 95(1), 138-160.
+
+Cochrane, John H. and Piazzesi, Monika (2009), *Decomposing the Yield Curve*. AFA 2010 Atlanta Meetings Paper, Available at SSRN: https://ssrn.com/abstract=1333274 or http://dx.doi.org/10.2139/ssrn.1333274
+
+Fama, Eugene F., and Robert. R. Bliss (1987), *The Information in Long-Maturity Forward Rates*, American Economic Review 77(4), 680–692.
+
+Gutierrez, A., Hevia, C. and Sola, M. (2020). *Bond risk premia and the return forecasting factor*, Studies in Nonlinear Dynamics & Econometrics, 24(1), 20180009. https://doi.org/10.1515/snde-2018-0009
+
+Hodrick, Robert J., and Tomunen, Tuomas (2018), *Taking the Cochrane-Piazzesi Term Structure Model Out of Sample: More Data, Additional Currencies, and FX Implications*, NBER Working Paper No. W25092, Available at SSRN: https://ssrn.com/abstract=3258189
+
+Sangvinatsos, Antonios, *The Expectations Hypothesis* (2008),  University of Southern California
